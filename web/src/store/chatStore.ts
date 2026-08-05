@@ -2391,22 +2391,10 @@ async function bindStream(
   set: Setter,
   get: Getter,
   hydratePending = false,
-  hydrateFromCache = false,
 ): Promise<void> {
   racedNativeModelOptions.delete(id);
   const controller = new AbortController();
   set({ abortController: controller });
-
-  const historyGeneration = get().historyGeneration;
-  const cachedItemIds = hydrateFromCache
-    ? new Set(
-        get()
-          .blocks.map((b) => b.ctx.itemId)
-          .filter((itemId): itemId is string => Boolean(itemId)),
-      )
-    : null;
-  const cacheHydrationStale = (): boolean =>
-    isConversationDisposed(id) || get().historyGeneration !== historyGeneration;
 
   void startStreamPump(id, controller, set, get);
 
@@ -2453,31 +2441,7 @@ async function bindStream(
     ]);
     if (isConversationDisposed(id)) return;
 
-    let historyPage = page;
-    let replaceCachedWindow = false;
-    if (cachedItemIds !== null) {
-      try {
-        const bridged = await backfillItemsUntilCovered(
-          id,
-          page,
-          cachedItemIds,
-          cacheHydrationStale,
-        );
-        if (bridged === "stale") {
-          if (!cacheHydrationStale()) set({ loadingMoreHistory: false });
-          return;
-        }
-        if (bridged === "uncovered") {
-          replaceCachedWindow = true;
-        } else {
-          historyPage = bridged;
-        }
-      } catch (err) {
-        console.warn(`Failed to backfill cached transcript for session ${id}:`, err);
-        historyPage = { items: [], hasMore: page.hasMore };
-      }
-      if (cacheHydrationStale()) return;
-    }
+    const historyPage = page;
     const items = historyPage.items;
 
     // Sticky-pref handoff for CLI-created sessions with no override.
@@ -2576,28 +2540,12 @@ async function bindStream(
         state.blocks.map((b) => b.ctx.itemId).filter((iid): iid is string => Boolean(iid)),
       );
       const unique = snapshotBlocks.filter((b) => !b.ctx.itemId || !seenItemIds.has(b.ctx.itemId));
-      let transcriptBlocks: AnyBlock[];
-      if (cachedItemIds === null) {
-        transcriptBlocks = [...unique, ...state.blocks];
-      } else if (!replaceCachedWindow) {
-        transcriptBlocks =
-          unique.length > 0 ? spliceUnseenAheadOfInFlight(state, unique) : state.blocks;
-      } else {
-        const rid =
-          state.activeResponse?.state === "streaming" ? state.activeResponse.responseId : null;
-        const liveTail = state.blocks.filter((b) => {
-          if (b.ctx.itemId) return !cachedItemIds.has(b.ctx.itemId);
-          if (b.type === "elicitation" || b.type === "error") return true;
-          return rid !== null && b.ctx.responseId === rid;
-        });
-        const liveTailIds = new Set(
-          liveTail.map((b) => b.ctx.itemId).filter((itemId): itemId is string => Boolean(itemId)),
-        );
-        transcriptBlocks = [
-          ...snapshotBlocks.filter((b) => !b.ctx.itemId || !liveTailIds.has(b.ctx.itemId)),
-          ...liveTail,
-        ];
-      }
+      // A cold bind: the entry has no window of its own yet, so the snapshot is
+      // simply prepended to whatever the pump has already pushed. (The two
+      // cache-window merge branches that used to live here served the transcript
+      // LRU's revisit path, which no longer exists — a revisit finds a live
+      // entry and never re-binds.)
+      const transcriptBlocks: AnyBlock[] = [...unique, ...state.blocks];
       // Dedupe against any elicitation blocks already produced by
       // the live pump (the snapshot may race ahead of or behind
       // the SSE event — match by elicitationId).
@@ -2701,18 +2649,14 @@ async function bindStream(
               code: session.lastTaskError.code,
             }
           : null;
-      const preserveCachedCursor = cachedItemIds !== null && !replaceCachedWindow;
       return {
         ...effectiveBindingPatch,
-        ...(cachedItemIds !== null ? reconnectStatusPatch(session, state) : {}),
         blocks: syntheticError !== null ? [...allBlocks, syntheticError] : allBlocks,
         pendingUserMessages: snapshotPending,
         loadingConversation: false,
-        hasMoreHistory: preserveCachedCursor ? state.hasMoreHistory : historyPage.hasMore,
-        oldestItemId: preserveCachedCursor ? state.oldestItemId : oldestItemId,
-        historyGeneration: preserveCachedCursor
-          ? state.historyGeneration
-          : state.historyGeneration + 1,
+        hasMoreHistory: historyPage.hasMore,
+        oldestItemId,
+        historyGeneration: state.historyGeneration + 1,
         loadingMoreHistory: false,
         sessionStatus: session.status,
         // Mid-turn first open: the snapshot carries the in-flight turn's
@@ -3315,6 +3259,14 @@ export async function startStreamPump(
       if (failedOpens > 0) {
         await abortableDelay(nextReconnectDelay(failedOpens), controller.signal);
         if (controller.signal.aborted || isConversationDisposed(id)) break;
+      } else if (hasConnected && conversationRegistry.getActive()?.id !== id) {
+        // Stagger a BACKGROUND conversation's reconnect. The ingress caps every
+        // stream at ~5 minutes, and streams opened together recycle together, so
+        // without this a tab holding N conversations fires N reconnects — each
+        // with a snapshot + items fetch — in one burst. The conversation on
+        // screen is never delayed.
+        await abortableDelay(backgroundReconnectJitter(), controller.signal);
+        if (controller.signal.aborted || isConversationDisposed(id)) break;
       }
 
       // Per-attempt controller: a presence idle flip recycles just this
@@ -3420,6 +3372,16 @@ export async function startStreamPump(
     }
   }
   /* eslint-enable no-await-in-loop */
+}
+
+// Spread background reconnects over a few seconds so N conversations recycling
+// at the same ingress deadline don't fire N snapshot fetches at once. Small
+// enough that a backgrounded conversation is still current well before the user
+// could switch to it.
+const BACKGROUND_RECONNECT_JITTER_MAX_MS = 3_000;
+
+function backgroundReconnectJitter(): number {
+  return Math.random() * BACKGROUND_RECONNECT_JITTER_MAX_MS;
 }
 
 /**
