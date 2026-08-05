@@ -1364,7 +1364,6 @@ function HarnessConfigModal({
   const isCodex = entryHarness === "codex-native";
   const modelOptions = isCodex ? codexModelOptions : claudeModelOptions;
   const modelsLoading = isCodex ? codexModelsLoading : claudeModelsLoading;
-  const modelDisplay = isCodex ? displayModelId : displayModelName;
   const brainDefault =
     agent.harness != null && agent.harness in brainHarnessLabels ? agent.harness : null;
 
@@ -1412,7 +1411,7 @@ function HarnessConfigModal({
   const configTitleName = autoNative ? SMART_ROUTING_LABEL : agent.display_name;
   const modelValue = smartRoutingOn ? MODEL_SELECT_SMART : draftModel || MODEL_SELECT_DEFAULT;
   const claudeModelSelectOptions = useMemo(
-    () => claudeModelOptions.map((m) => ({ id: m.id, label: m.displayName })),
+    () => claudeModelOptions.map((m) => ({ id: m.id, label: displayModelName(m) })),
     [claudeModelOptions],
   );
   const codexModelSelectOptions = useMemo(
@@ -1599,6 +1598,7 @@ function HarnessConfigModal({
                   offerSmartRouting={smartRoutingEligible}
                   testId="new-chat-landing-config-model"
                   models={codexModelSelectOptions}
+                  defaultLabel={defaultModelLabel(codexModelOptions, displayModelId)}
                   contentClassName="[&_[data-slot=select-item]]:pl-2.5"
                 >
                   {modelsLoading && (
