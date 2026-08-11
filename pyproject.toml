@@ -89,9 +89,11 @@ dependencies = [
     "tiktoken>=0.7,<1",
     "opentelemetry-exporter-otlp-proto-grpc>=1.20,<2",
     "opentelemetry-exporter-otlp-proto-http>=1.20,<2",
-    "opentelemetry-instrumentation-fastapi>=0,<1",
-    "opentelemetry-instrumentation-httpx>=0,<1",
-    "opentelemetry-instrumentation-sqlalchemy>=0,<1",
+    # OpenTelemetry instrumentation releases use beta versions (for example,
+    # 0.65b0). An explicit prerelease floor is required for pip to consider them.
+    "opentelemetry-instrumentation-fastapi>=0.41b0,<1",
+    "opentelemetry-instrumentation-httpx>=0.41b0,<1",
+    "opentelemetry-instrumentation-sqlalchemy>=0.41b0,<1",
     # The Claude Code and OpenAI Agents harnesses are part of the
     # baseline install — every CUJ command in the README depends on at
     # least one of them, so making them optional just forces every user
@@ -248,7 +250,7 @@ databricks = [
     # Floor matches what core code was tested against when the SDK was a
     # default dependency (it moved here from `dependencies` above).
     "databricks-sdk>=0.56.0,<1",
-    "opentelemetry-distro>=0,<1",
+    "opentelemetry-distro>=0.41b0,<1",
     "psycopg[binary]>=3.1,<4",
     "pymysql>=1.1,<2",
     # Databricks-specific MCP servers. Not imported by core Omnigent
