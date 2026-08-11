@@ -177,6 +177,7 @@ SUPPORTED_SANDBOX_PROVIDERS: frozenset[str] = frozenset(
         "e2b",
         "openshell",
         "kubernetes",
+        "mesos",
     }
 )
 PROVIDERS_WITH_MANAGED_LAUNCH: frozenset[str] = frozenset(
@@ -190,6 +191,7 @@ PROVIDERS_WITH_MANAGED_LAUNCH: frozenset[str] = frozenset(
         "e2b",
         "openshell",
         "kubernetes",
+        "mesos",
     }
 )
 
@@ -991,6 +993,12 @@ def parse_sandbox_config(raw: object) -> ManagedSandboxConfig | None:
             secret_mounts=secret_mounts,
         )
         token_ttl_s = KUBERNETES_MANAGED_TOKEN_TTL_S
+    elif provider == "mesos":
+        launcher_factory = _mesos_launcher_factory(
+            image=_parse_provider_image(raw, "mesos"),
+            env=_parse_provider_env(raw, "mesos"),
+        )
+        token_ttl_s = KUBERNETES_MANAGED_TOKEN_TTL_S          
     else:
         launcher_factory = _unsupported_launcher_factory(provider)
         # Never consulted (the factory rejects before any token is
@@ -2288,6 +2296,24 @@ def _kubernetes_launcher_factory(
 
     return _build
 
+def _mesos_launcher_factory(
+    *,
+    image: str | None,
+    env: list[str] | None,
+) -> Callable[[], SandboxLauncher]:
+    """
+    Build the launcher factory for the YAML ``provider: mesos`` path.
+    """
+    def _build() -> SandboxLauncher:
+        """Construct the Kubernetes launcher (lazy SDK import inside)."""
+        from omnigent.onboarding.sandboxes.mesos import MesosSandboxLauncher
+
+        return MesosSandboxLauncher(
+            image=image,
+            env=env,
+        )
+
+    return _build
 
 async def launch_managed_host(
     *,
