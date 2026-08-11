@@ -325,7 +325,7 @@ def resolve_managed_agent_label(
         return None
     try:
         agent = agent_store.get(agent_id)
-    except Exception:  # noqa: BLE001 — the label is an optimization, never a
+    except Exception:
         # create precondition. Any store failure degrades to an unlabeled runner
         # (the admission policy skips it) rather than 500-ing a create that has
         # already committed and announced the session.
@@ -994,11 +994,22 @@ def parse_sandbox_config(raw: object) -> ManagedSandboxConfig | None:
         )
         token_ttl_s = KUBERNETES_MANAGED_TOKEN_TTL_S
     elif provider == "mesos":
+        mesos_section = _parse_provider_section(raw, "mesos")
+        if mesos_section is not None:
+            _reject_unknown_keys(
+                mesos_section,
+                {"image", "env", "compose_url", "username", "verify_ssl", "target_hostname"},
+                "sandbox.mesos",
+            )
         launcher_factory = _mesos_launcher_factory(
             image=_parse_provider_image(raw, "mesos"),
             env=_parse_provider_env(raw, "mesos"),
+            compose_url=_parse_provider_string(raw, "mesos", "compose_url"),
+            username=_parse_provider_string(raw, "mesos", "username"),
+            verify_ssl=_parse_provider_bool(raw, "mesos", "verify_ssl"),
+            target_hostname=_parse_provider_string(raw, "mesos", "target_hostname"),
         )
-        token_ttl_s = KUBERNETES_MANAGED_TOKEN_TTL_S          
+        token_ttl_s = KUBERNETES_MANAGED_TOKEN_TTL_S
     else:
         launcher_factory = _unsupported_launcher_factory(provider)
         # Never consulted (the factory rejects before any token is
@@ -2296,24 +2307,35 @@ def _kubernetes_launcher_factory(
 
     return _build
 
+
 def _mesos_launcher_factory(
     *,
     image: str | None,
     env: list[str] | None,
-) -> Callable[[], SandboxLauncher]:
+    compose_url: str | None,
+    username: str | None,
+    verify_ssl: bool | None,
+    target_hostname: str | None,
+) -> Callable[[], SandboxHostLauncher]:
     """
     Build the launcher factory for the YAML ``provider: mesos`` path.
     """
-    def _build() -> SandboxLauncher:
-        """Construct the Kubernetes launcher (lazy SDK import inside)."""
+
+    def _build() -> SandboxHostLauncher:
+        """Construct the mesos-compose launcher."""
         from omnigent.onboarding.sandboxes.mesos import MesosSandboxLauncher
 
         return MesosSandboxLauncher(
             image=image,
             env=env,
+            compose_url=compose_url,
+            username=username,
+            verify_ssl=verify_ssl,
+            target_hostname=target_hostname,
         )
 
     return _build
+
 
 async def launch_managed_host(
     *,
@@ -2452,7 +2474,15 @@ async def relaunch_managed_host(
     # The old generation is normally already dead (that is why we are
     # here), but terminate defensively so a transient tunnel outage
     # can never leave two live sandboxes claiming one host identity.
-    await _terminate_sandbox_best_effort(launcher, host)
+    terminated = await _terminate_sandbox_best_effort(launcher, host)
+    if not terminated and launcher.requires_durable_cleanup:
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                "managed sandbox relaunch blocked because termination of the "
+                "previous sandbox could not be confirmed"
+            ),
+        )
     try:
         await asyncio.to_thread(launcher.prepare)
         sandbox_id = await asyncio.to_thread(launcher.provision, host.name)
@@ -2911,13 +2941,10 @@ async def terminate_managed_host(
     """
     Terminate a managed host's sandbox and delete its host row.
 
-    Deleting the row is both teardown and revocation in one operation:
-    the host disappears from the picker AND its launch token stops
-    resolving. Best-effort on the sandbox side: termination failures
-    (or a missing/mismatched launcher after a config change) are
-    logged, not raised — the provider's lifetime cap reaps stragglers,
-    and the caller (session delete / launch-failure cleanup) must not
-    be blocked by provider hiccups.
+    Deleting the row is both teardown and revocation in one operation.
+    Providers with a lifetime cap retain the existing best-effort behavior.
+    Providers requiring confirmed cleanup keep the row on failure as a
+    reconciliation record, while their launch token is revoked immediately.
 
     :param host: The managed host to tear down (``sandbox_provider`` /
         ``sandbox_id`` set; callers guard on that).
@@ -2927,32 +2954,41 @@ async def terminate_managed_host(
         when managed hosts are no longer configured.
     """
     launcher = _launcher_for_teardown(host, config)
-    await _terminate_sandbox_best_effort(launcher, host)
+    terminated = await _terminate_sandbox_best_effort(launcher, host)
+    requires_durable_cleanup = host.sandbox_provider == "mesos" or (
+        launcher is not None and launcher.requires_durable_cleanup
+    )
+    if not terminated and requires_durable_cleanup:
+        # Preserve provider + sandbox id for reconciliation, but invalidate
+        # the launch credential immediately so an orphan cannot reconnect.
+        await asyncio.to_thread(host_store.revoke_launch_token, host.host_id)
+        return
     await asyncio.to_thread(host_store.delete_host, host.host_id)
 
 
 async def _terminate_sandbox_best_effort(
     launcher: SandboxHostLauncher | None,
     host: Host,
-) -> None:
+) -> bool:
     """
     Terminate a managed host's sandbox without touching its row.
 
-    Best-effort by design: termination failures (or a
-    missing/mismatched launcher after a config change) are logged, not
-    raised — the provider's lifetime cap reaps stragglers, and callers
-    (session delete, launch-failure cleanup, relaunch) must not be
-    blocked by provider hiccups.
+    Termination failures (or a missing/mismatched launcher after a config
+    change) are logged and reported to the caller as ``False``. Callers decide
+    whether a provider lifetime cap permits row deletion or whether the row
+    must remain as a durable reconciliation record.
 
     :param launcher: Provider-matched launcher from
         :func:`_launcher_for_teardown`, or ``None`` when no matching
         launcher is available (logged, nothing terminated).
     :param host: The host whose ``sandbox_id`` names the sandbox.
+    :returns: ``True`` only when provider-side termination completed.
     """
     if launcher is not None and host.sandbox_id is not None:
         try:
             await asyncio.to_thread(launcher.terminate, host.sandbox_id)
-        except Exception:  # noqa: BLE001 — deliberate broad catch: this is a
+            return True
+        except Exception:
             # provider-API boundary on a cleanup path. The provider SDK can
             # fail here in many shapes (auth/config ClickException, network
             # errors, SDK-internal exceptions), the sandbox may already be
@@ -2973,3 +3009,4 @@ async def _terminate_sandbox_best_effort(
             host.sandbox_provider,
             host.sandbox_id,
         )
+    return False

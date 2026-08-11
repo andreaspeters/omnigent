@@ -395,6 +395,9 @@ class SandboxLifecycle(ABC):
     supports_cli_bootstrap: ClassVar[bool] = True
     can_resume: ClassVar[bool] = False
     supports_managed_launch: ClassVar[bool] = True
+    # Providers without a provider-side lifetime cap keep the host row as a
+    # durable cleanup record when termination cannot be confirmed.
+    requires_durable_cleanup: ClassVar[bool] = False
 
     @property
     def capabilities(self) -> _sandbox_types.SandboxCapabilities:
