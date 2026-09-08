@@ -9,7 +9,15 @@
 // Python class name lowercased (e.g. ResponseCreated → "response_created").
 
 import type { RoutingDecisionExtras } from "./routingDecision";
-import type { ErrorInfo, ModelUsage, RememberScope, Response, SandboxLaunchStage } from "./types";
+import type {
+  BackgroundTaskInfo,
+  CodexPersistMode,
+  ErrorInfo,
+  ModelUsage,
+  RememberScope,
+  Response,
+  SandboxLaunchStage,
+} from "./types";
 
 /** Provider-native tool item types. */
 export const NATIVE_TOOL_TYPES = new Set<string>([
@@ -261,6 +269,8 @@ export interface ElicitationRequest {
    * where the allow rule is meaningful.
    */
   rememberScope?: RememberScope | null;
+  /** Codex-native MCP approval persistence modes advertised by the request. */
+  codexPersistModes?: CodexPersistMode[];
 }
 
 /**
@@ -403,6 +413,13 @@ export interface ErrorEvent {
 /** `response.compaction.in_progress` — server started compacting. */
 export interface CompactionInProgress {
   type: "compaction_in_progress";
+  /**
+   * Unix epoch seconds when the server first saw this compaction in
+   * progress. Stable across the repeated progress events a long compaction
+   * emits, so the elapsed counter can anchor to the true start — including
+   * after a page reload. Absent when the emitter doesn't track it.
+   */
+  startedAtS?: number;
 }
 
 /** `response.compaction.completed` — compaction finished successfully. */
@@ -461,6 +478,12 @@ export interface SessionStatusEvent {
   status: "idle" | "launching" | "running" | "waiting" | "failed";
   responseId?: string;
   backgroundTaskCount?: number;
+  /**
+   * Per-shell detail behind `backgroundTaskCount`, so the UI can name each
+   * running shell. Rides alongside an authoritative count on the `Stop` edge;
+   * absent when the edge carries no detail.
+   */
+  backgroundTasks?: BackgroundTaskInfo[];
   /**
    * Short phrase naming what a still-`running` session is parked on, e.g.
    * "permission prompt". Terminal-backed agents can block on a dialog the
@@ -568,6 +591,18 @@ export interface SessionPermissionModeEvent {
   type: "session_permission_mode";
   conversationId: string;
   permissionMode: string;
+}
+
+/**
+ * `session.codex_approval_mode` — active codex-native approval/sandbox switch.
+ *
+ * Emitted when the web picker switches the mode, and when the Codex forwarder
+ * sees a `thread/settings/updated` (a `/permissions` change made in the TUI).
+ */
+export interface SessionCodexApprovalModeEvent {
+  type: "session_codex_approval_mode";
+  conversationId: string;
+  approvalMode: string;
 }
 
 /**
@@ -932,6 +967,7 @@ export type StreamEvent =
   | SessionReasoningEffortEvent
   | SessionCollaborationModeEvent
   | SessionPermissionModeEvent
+  | SessionCodexApprovalModeEvent
   | SessionAgentChangedEvent
   | SessionTodosEvent
   | SessionTerminalPendingEvent
