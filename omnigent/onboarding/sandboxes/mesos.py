@@ -37,6 +37,8 @@ from omnigent.onboarding.sandboxes.types import SandboxCapabilities
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from omnigent.onboarding.sandboxes.types import RepoWorkspace
+
 
 HOST_IMAGE_ENV_VAR = "OMNIGENT_MESOS_HOST_IMAGE"
 COMPOSE_URL_ENV_VAR = "OMNIGENT_MESOS_COMPOSE_URL"
@@ -340,17 +342,23 @@ class MesosSandboxLauncher(SandboxHostLauncher):
         host_id: str,
         host_name: str,
         server_url: str,
-        repo_url: str | None = None,
-        repo_branch: str | None = None,
-        repo_name: str | None = None,
+        repos: Sequence[RepoWorkspace] = (),
         host_config: dict[str, object] | None = None,
         on_stage: Callable[[str], None] | None = None,
     ) -> str:
         """Submit the host service to mesos-compose and wait for TASK_RUNNING."""
+        if len(repos) > 1:
+            raise click.ClickException(
+                "The 'mesos' provider supports at most one repository per session"
+            )
+        repo = repos[0] if repos else None
+        repo_url = repo.url if repo is not None else None
+        repo_branch = repo.branch if repo is not None else None
+        repo_name = repo.repo_name if repo is not None else None
         workspace = f"{_HOME_DIR}/workspace"
         clone_dir = f"{workspace}/{repo_name}" if repo_url is not None and repo_name else None
         if on_stage is not None:
-            on_stage("starting")
+            on_stage("cloning" if repo is not None else "starting")
         manifest = build_compose_manifest(
             image=self._resolve_image(),
             sandbox_id=sandbox_id,

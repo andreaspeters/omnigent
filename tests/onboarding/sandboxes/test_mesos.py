@@ -13,6 +13,7 @@ import yaml
 from omnigent.host.identity import HOST_ID_ENV_VAR, HOST_NAME_ENV_VAR, HOST_TOKEN_ENV_VAR
 from omnigent.onboarding.sandboxes.base import DEFAULT_HOST_IMAGE
 from omnigent.onboarding.sandboxes.mesos import MesosSandboxLauncher, build_compose_manifest
+from omnigent.onboarding.sandboxes.types import RepoWorkspace
 
 
 class _FakeClient:
@@ -115,11 +116,18 @@ def test_launcher_uses_mesos_compose_api_for_lifecycle(monkeypatch: pytest.Monke
         host_id="host-id",
         host_name="managed-a1b2",
         server_url="https://omnigent.example",
+        repos=[
+            RepoWorkspace(
+                url="https://github.com/example/repo.git",
+                branch="main",
+                repo_name="repo",
+            )
+        ],
     )
     launcher.terminate(sandbox_id)
 
     assert sandbox_id.startswith("omnigent-managed-a1b2-")
-    assert workspace == "/mnt/mesos/sandbox/workspace"
+    assert workspace == "/mnt/mesos/sandbox/workspace/repo"
     assert [(method, url) for method, url, _ in fake.requests] == [
         ("GET", "/api/compose/versions"),
         ("PUT", f"/api/compose/v0/{sandbox_id}"),
@@ -130,6 +138,27 @@ def test_launcher_uses_mesos_compose_api_for_lifecycle(monkeypatch: pytest.Monke
     assert pushed["services"]["host"]["deploy"]["placement"]["constraints"] == [
         "node.hostname==agent.example"
     ]
+    assert "git clone --branch main --single-branch --" in pushed["services"]["host"][
+        "command"
+    ]
+
+
+def test_start_host_rejects_multiple_repositories() -> None:
+    launcher = MesosSandboxLauncher(compose_url="https://compose.example", env=())
+    repos = [
+        RepoWorkspace(url="https://github.com/example/one.git", branch=None, repo_name="one"),
+        RepoWorkspace(url="https://github.com/example/two.git", branch=None, repo_name="two"),
+    ]
+
+    with pytest.raises(click.ClickException, match="at most one repository"):
+        launcher.start_host(
+            "sandbox",
+            token="token",
+            host_id="host-id",
+            host_name="host-name",
+            server_url="https://omnigent.example",
+            repos=repos,
+        )
 
 
 def test_prepare_surfaces_mesos_compose_auth_failure(monkeypatch: pytest.MonkeyPatch) -> None:
